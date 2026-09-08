@@ -1,79 +1,84 @@
 # Blot Notebook / wbquant
 
-Western blot の定量計算と実験管理を行う、ローカル保存型のデスクトップアプリです。
-`app.py` が PySide6 の GUI、`core.py` が定量処理とデータ保存を担当します。
+An offline desktop application for Western blot quantification and experiment tracking.
+`app.py` provides the PySide6 GUI, while `core.py` handles calculations and data storage.
 
-ビルド済みアプリは [GitHub Releases](https://github.com/CYJ-777/BlotNotebook/releases) からダウンロードできます。
-Windows x64、Mac Apple Silicon、Mac Intel 用の ZIP を提供します。Python のインストールは不要です。
+Download ready-to-use ZIP packages for Windows x64, Mac Apple Silicon, and Mac Intel from
+[GitHub Releases](https://github.com/CYJ-777/BlotNotebook/releases). Python is not required to run these packages.
 
-## 起動
+## Run from source
 
-uv を用意し、この README があるプロジェクト直下で実行します。
+Install uv, then run this command from the project root (the folder containing this README):
 
 ```sh
 uv run app.py
 ```
 
-Python 3.13 と必要なライブラリは uv が準備します。初回の環境構築にはインターネット接続が必要です。
-初回起動では実験データの保存先を自動作成し、そのままメイン画面が開きます。
+uv prepares Python 3.13 and the required dependencies. Initial setup requires an internet connection.
+On first launch, the app creates its experiment library automatically and opens the main window.
 
-- Mac：`~/Documents/BlotNotebook`
-- Windows：ユーザーの「ドキュメント」内の `BlotNotebook`（通常は `C:\Users\ユーザー名\Documents\BlotNotebook`）
+- **macOS:** `~/Documents/BlotNotebook`
+- **Windows:** `BlotNotebook` inside your Documents folder, typically `C:\Users\<username>\Documents\BlotNotebook`
 
-Windows のドキュメントを別の場所に移している場合は、OS が返す実際の場所を使用します。
-保存先は記憶されます。以前に保存先を選択済みの場合は、その場所を引き続き使い、データの自動移動は行いません。
-保存先を作成できない場合はエラーを表示します。
+If your Windows Documents folder has been relocated, the app uses the location reported by the OS.
+The library location is remembered. If you previously selected a library, the app continues to use it without moving your data.
+An error is shown if the library cannot be created.
 
-保存先を明示して起動することもできます。
+To use a specific library for one session:
 
 ```sh
 uv run app.py --library ./data
 ```
 
-`--library` はその起動にだけ適用され、記憶済みの保存先を変更しません。
-保存先には `wbquant.sqlite3` と原本ファイルのコピーが作られます。
-バックアップする際はアプリを閉じ、保存先フォルダ全体をコピーしてください。
+`--library` applies only to that session and does not change the remembered location.
+The library contains `wbquant.sqlite3` and copies of attached original files.
+To back up your data, close the app and copy the entire library folder.
 
-## ファイル構成
+## Project structure
 
 ```text
-app.py              GUI・起動処理
-core.py             定量計算・取込・SQLite保存・CSV出力
-pyproject.toml      Python要件・依存ライブラリ
-uv.lock             依存ライブラリの固定情報
-tests/              自動テスト
-examples/           取込用のサンプルTSV
-docs/user-guide.md  詳細な操作説明
-archive/            以前の検証資料・データ（通常の起動には不要）
+app.py              GUI and application entry point
+core.py             Calculations, imports, SQLite storage, and CSV export
+pyproject.toml      Python requirements and dependencies
+uv.lock             Locked dependency versions
+BlotNotebook.spec   Shared macOS and Windows PyInstaller configuration
+tests/              Automated tests
+examples/           Sample TSV files for import
+docs/user-guide.md  Detailed usage instructions
+docs/build.md       Build and release instructions
+.github/workflows/  GitHub Actions build and release workflow
 ```
 
-## テスト
+## Tests
 
 ```sh
 uv run python -m unittest discover -s tests -v
 ```
 
-定量処理のテストに加え、一時フォルダを使って画面表示なしでGUIの起動とデータベース作成を確認します。
+Tests cover calculations, data storage, default library selection, and offscreen GUI startup with a temporary library.
 
-## アプリのビルド
+## Build the application
 
-Mac / Windows のそれぞれの環境で実行してください。
+Run the following command on each target operating system. Build the macOS app on macOS and the Windows app on Windows.
 
 ```sh
 uv run --locked --group build pyinstaller --noconfirm BlotNotebook.spec
 ```
 
-Mac は `dist/BlotNotebook.app`、Windows は `dist/BlotNotebook/BlotNotebook.exe` を起動します。
-Windows は `_internal` を含むフォルダ全体が必要です。
-詳しくは [ビルド手順](docs/build.md) を参照してください。GitHub Actions では手動ビルドと、バージョンタグによる Release 配布に対応しています。
+On macOS, open `dist/BlotNotebook.app`. On Windows, open `dist/BlotNotebook/BlotNotebook.exe`.
+The Windows package requires the entire `BlotNotebook` folder, including `_internal`.
 
-## 構成変更
+See the [build instructions](docs/build.md) for details. GitHub Actions supports manual builds and
+publishes Release packages when a version tag is pushed. Build outputs are excluded from Git.
 
-以前の `outputs/wbquant/` のソースはプロジェクト直下に移動しました。
-旧パスを使用する起動設定は更新してください。起動対象は `app.py` です。
-挨拶だけを表示していた `main.py`、旧Windowsビルド、古い配布ZIPは削除しました。
-現在の `BlotNotebook.spec` は整理後の構成に対応した Mac / Windows 共通ビルド設定です。
-依存関係は `pyproject.toml` と `uv.lock` で管理します。
-以前の `work/` にあった検証資料とデータベースは `archive/legacy-work/` に保管しています。
-その中の旧スクリプトや資料は当時の記録であり、現在の構成での実行対象ではありません。
-実験データの形式と、アプリが記憶している保存先設定は変更していません。
+## Layout changes
+
+Source files previously stored in `outputs/wbquant/` now live in the project root.
+Update any launch configurations that reference the old paths. The application entry point is `app.py`.
+The placeholder `main.py`, old Windows binaries, and outdated distribution ZIPs have been removed.
+`BlotNotebook.spec` now provides a shared macOS and Windows build configuration for the current layout.
+Dependencies are managed through `pyproject.toml` and `uv.lock`.
+
+During cleanup, previous verification materials and databases from `work/` were preserved locally in
+`archive/legacy-work/`. These historical files are not included in the repository or required to run the app.
+The experiment data format and remembered library settings were preserved.
