@@ -53,9 +53,15 @@ Remove-Item Env:BLOTNOTEBOOK_EXECUTABLE
 
 ## GitHub Actions
 
-`.github/workflows/build.yml` は手動実行用です。GitHub にコードを置いた後、Actions の **Build desktop apps → Run workflow** から実行できます。
-macOS と Windows でそれぞれソースのテスト、ビルド、生成アプリの起動テストを行い、成功した成果物をアップロードします。
-このファイルの追加だけではビルドは実行されません。
+`.github/workflows/build.yml` は macOS ARM64、macOS x64、Windows x64 の3環境でソースのテスト、ビルド、生成アプリの起動テストを行います。
+Actions の **Build desktop apps → Run workflow** で手動実行すると、ZIP を Actions の成果物として取得できます。
+
+`v` で始まるタグを push すると、3環境すべての成功後に GitHub Release を公開します。
+Release には3種類の ZIP と `SHA256SUMS.txt` を添付します。説明文は `docs/release-notes.md` で管理します。
+バージョン更新時は `pyproject.toml` と `BlotNotebook.spec` のバージョン、リリース説明を更新してからタグを作成してください。
+非公開リポジトリの Release は、そのリポジトリにアクセスできるユーザー向けの配布になります。
+
+配布先：[GitHub Releases](https://github.com/CYJ-777/BlotNotebook/releases)
 
 起動テストは一時ライブラリを使用し、4つのタブ、SQLite の整合性、画面画像の生成を確認します。
 実際のクリック操作や他の端末での配布動作まで保証するテストではありません。

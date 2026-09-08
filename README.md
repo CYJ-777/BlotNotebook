@@ -3,6 +3,9 @@
 Western blot の定量計算と実験管理を行う、ローカル保存型のデスクトップアプリです。
 `app.py` が PySide6 の GUI、`core.py` が定量処理とデータ保存を担当します。
 
+ビルド済みアプリは [GitHub Releases](https://github.com/CYJ-777/BlotNotebook/releases) からダウンロードできます。
+Windows x64、Mac Apple Silicon、Mac Intel 用の ZIP を提供します。Python のインストールは不要です。
+
 ## 起動
 
 uv を用意し、この README があるプロジェクト直下で実行します。
@@ -62,7 +65,7 @@ uv run --locked --group build pyinstaller --noconfirm BlotNotebook.spec
 
 Mac は `dist/BlotNotebook.app`、Windows は `dist/BlotNotebook/BlotNotebook.exe` を起動します。
 Windows は `_internal` を含むフォルダ全体が必要です。
-詳しくは [ビルド手順](docs/build.md) を参照してください。GitHub Actions の手動ビルド設定も用意しています。
+詳しくは [ビルド手順](docs/build.md) を参照してください。GitHub Actions では手動ビルドと、バージョンタグによる Release 配布に対応しています。
 
 ## 構成変更
 
