@@ -23,4 +23,4 @@ exe = EXE(
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='BlotNotebook')
 if sys.platform == 'darwin':
     app = BUNDLE(coll, name='BlotNotebook.app', icon=None,
-                 bundle_identifier='local.blotnotebook.desktop', version='0.1.0')
+                 bundle_identifier='local.blotnotebook.desktop', version='0.2.0')
