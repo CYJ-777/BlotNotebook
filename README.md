@@ -6,20 +6,13 @@ An offline desktop application for Western blot quantification and experiment tr
 Download ready-to-use ZIP packages for Windows x64, Mac Apple Silicon, and Mac Intel from
 [GitHub Releases](https://github.com/CYJ-777/BlotNotebook/releases). Python is not required to run these packages.
 
-## Data storage
+## Projects and data storage
 
-**Experiment data is saved in your Documents folder**, for both the downloaded app and the source version.
-On first launch, the app creates its library automatically and opens the main window.
+At every normal launch, choose a recent project, open another project, or create a project in any folder. The initial suggested location is `BlotNotebook` inside the operating system's Documents folder, but projects can live elsewhere and each project has its own experiments and archived originals. Use **Switch project…** in the sidebar to change projects without restarting the app.
 
-- **macOS:** `~/Documents/BlotNotebook`
-- **Windows:** `BlotNotebook` inside your Documents folder, typically `C:\Users\<username>\Documents\BlotNotebook`
+A project is a portable folder containing `project.json`, one `experiment.json` per experiment, and copies of attached original files stored directly in each experiment's `originals` folder. The ten most recently opened project paths are remembered in the application's local settings. To back up or move a project, close the app and copy the entire project folder.
 
-The library contains the `wbquant.sqlite3` database and copies of attached original files. Archived files are stored directly under each experiment's `originals` folder; legacy per-attachment UUID folders are flattened automatically when the library opens.
-To back up your data, close the app and copy the entire `BlotNotebook` library folder.
-
-If your Windows Documents folder has been relocated, the app uses the location reported by the OS.
-The library location is remembered. If you previously selected a library, the app continues to use it without moving your data.
-An error is shown if the library cannot be created.
+Opening a previous project that contains `wbquant.sqlite3` performs a read-only import into JSON. The database is not modified or deleted and remains as a backup. Legacy per-attachment archive folders are copied into the flat JSON layout while their original files remain available to the database backup. See the [JSON project storage documentation](docs/storage.md) for the layout, save guarantees, migration behavior, and compatibility notes.
 
 ## macOS security note
 
@@ -52,21 +45,21 @@ uv run app.py
 ```
 
 uv prepares Python 3.13 and the required dependencies. Initial setup requires an internet connection.
-The app uses the Documents library described above by default.
+The app shows the Project chooser described above.
 
-To use a specific library for one session:
+To open a specific project directly and skip the chooser for one session:
 
 ```sh
-uv run app.py --library ./data
+uv run app.py --project ./data
 ```
 
-`--library` applies only to that session and does not change the remembered location.
+`--project` applies only to that session and does not change the recent-project list. `--library` remains as a compatibility alias.
 
 ## Project structure
 
 ```text
 app.py              GUI and application entry point
-core.py             Calculations, imports, SQLite storage, and CSV export
+core.py             Calculations, imports, JSON project storage, and CSV export
 pyproject.toml      Python requirements and dependencies
 uv.lock             Locked dependency versions
 BlotNotebook.spec   Shared macOS and Windows PyInstaller configuration
@@ -74,6 +67,7 @@ assets/             Application icon assets
 tests/              Automated tests
 examples/           Sample TSV files for import
 docs/user-guide.md  Detailed usage instructions
+docs/storage.md     JSON layout and SQLite migration details
 docs/build.md       Build and release instructions
 .github/workflows/  GitHub Actions build and release workflow
 ```
@@ -84,7 +78,7 @@ docs/build.md       Build and release instructions
 uv run python -m unittest discover -s tests -v
 ```
 
-Tests cover calculations, data storage, default library selection, and offscreen GUI startup with a temporary library.
+Tests cover calculations, JSON storage, SQLite migration, project selection, and offscreen GUI startup with a temporary project.
 
 ## Build the application
 
@@ -110,4 +104,4 @@ Dependencies are managed through `pyproject.toml` and `uv.lock`.
 
 During cleanup, previous verification materials and databases from `work/` were preserved locally in
 `archive/legacy-work/`. These historical files are not included in the repository or required to run the app.
-The experiment data format and remembered library settings were preserved.
+Legacy SQLite libraries are imported non-destructively when opened as projects. The original database remains in place.

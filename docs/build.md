@@ -63,5 +63,5 @@ Release には3種類の ZIP と `SHA256SUMS.txt` を添付します。説明文
 
 配布先：[GitHub Releases](https://github.com/CYJ-777/BlotNotebook/releases)
 
-起動テストは一時ライブラリを使用し、4つのタブ、SQLite の整合性、画面画像の生成を確認します。
+起動テストは一時Projectを使用し、4つのタブ、JSONデータの整合性、画面画像の生成を確認します。
 実際のクリック操作や他の端末での配布動作まで保証するテストではありません。

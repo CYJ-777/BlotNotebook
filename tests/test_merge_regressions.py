@@ -1,10 +1,11 @@
 """Integration coverage for the UI and archive changes merged into main."""
 import csv
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtWidgets import QApplication
@@ -25,7 +26,7 @@ class MergeTests(unittest.TestCase):
             group_b = next(r for r in rows if r[0] == 'Relative expression' and r[7] == 'B')
             self.assertEqual(group_b[11:], ['0.5', '', '1.0', '0.25'])
 
-    def test_partial_archive_rename_failure_restores_files_and_database(self):
+    def test_partial_archive_rename_failure_restores_files_and_json(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = Store(root / 'library')
@@ -54,7 +55,7 @@ class MergeTests(unittest.TestCase):
                 for f in e['files']:
                     self.assertEqual(store.archived_path(f).read_bytes(), f['filename'].encode())
             finally:
-                store.db.close()
+                store.close()
 
     def test_group_filter_range_clipboard_and_icons(self):
         application = QApplication.instance() or QApplication([])
@@ -88,6 +89,29 @@ class MergeTests(unittest.TestCase):
                 self.assertFalse(window.grab().isNull())
             finally:
                 application.clipboard().clear()
+                window.close()
+                window.deleteLater()
+                application.processEvents()
+
+    def test_switch_project_replaces_store_and_updates_recent_projects(self):
+        application = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / 'First'
+            second = Path(directory) / 'Second'
+            settings = Mock()
+            settings.value.return_value = []
+            window = MainWindow(first, settings)
+            try:
+                with (
+                    patch('app.choose_project', return_value=second),
+                    patch('app.default_project_path', return_value=Path(directory) / 'Default'),
+                ):
+                    window.switch_project()
+                self.assertEqual(window.store.root, second.resolve())
+                self.assertTrue((second / 'project.json').is_file())
+                self.assertEqual(window.project_name.text(), 'Second')
+                self.assertEqual(json.loads(settings.setValue.call_args.args[1]), [str(second.resolve())])
+            finally:
                 window.close()
                 window.deleteLater()
                 application.processEvents()

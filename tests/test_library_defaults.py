@@ -1,5 +1,6 @@
-"""Verify first-launch storage selection without touching user settings or data."""
+"""Verify project selection and recent-project settings without touching user data."""
 
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,85 +10,103 @@ import app
 from core import Store
 
 
-class LibraryDefaultsTests(unittest.TestCase):
-    def _launch(self, directory, saved=None, explicit=None, documents=None):
+class ProjectSelectionTests(unittest.TestCase):
+    def _launch(self, directory, selected=None, explicit=None, settings_values=None):
+        settings_values = settings_values or {}
         settings = Mock()
-        settings.value.return_value = saved
+        settings.value.side_effect = lambda key, default=None: settings_values.get(key, default)
         window = Mock()
         opened = []
 
-        def open_library(root):
+        def open_project(root, application_settings):
             store = Store(root)
             opened.append(store.root)
-            store.db.close()
+            store.close()
             return window
 
-        argv = ['app.py'] + (['--library', str(explicit)] if explicit else [])
+        argv = ['app.py'] + (['--project', str(explicit)] if explicit else [])
+        default = Path(directory) / 'Documents' / 'BlotNotebook'
         with (
             patch.object(app.sys, 'argv', argv),
             patch.object(app, 'QApplication') as application,
             patch.object(app, 'QIcon'),
             patch.object(app, 'QSettings', return_value=settings),
-            patch.object(app.QStandardPaths, 'writableLocation', return_value=(
-                str(Path(directory) / 'Documents') if documents is None else documents
-            )) as location,
-            patch.object(app, 'MainWindow', side_effect=open_library),
-            patch.object(app.QFileDialog, 'getExistingDirectory') as picker,
+            patch.object(app, 'default_project_path', return_value=default),
+            patch.object(app, 'choose_project', return_value=selected) as chooser,
+            patch.object(app, 'MainWindow', side_effect=open_project),
             patch.object(app.QMessageBox, 'critical') as error,
         ):
             application.return_value.exec.return_value = 0
             result = app.main()
-        picker.assert_not_called()
-        return result, opened, settings, window, location, error
+        return result, opened, settings, window, chooser, error, default
 
-    def test_first_launch_creates_documents_library_and_remembers_it(self):
+    def test_startup_chooses_project_and_remembers_it(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
-            result, opened, settings, window, location, error = self._launch(directory)
-            expected = Path(directory) / 'Documents' / 'BlotNotebook'
+            selected = Path(directory) / 'Project A'
+            selected.mkdir()
+            result, opened, settings, window, chooser, error, default = self._launch(
+                directory, selected=selected,
+            )
             self.assertEqual(result, 0)
-            self.assertEqual(opened, [expected.resolve()])
-            self.assertTrue((expected / 'wbquant.sqlite3').is_file())
-            settings.setValue.assert_called_once_with('library', str(expected.resolve()))
-            location.assert_called_once_with(app.QStandardPaths.StandardLocation.DocumentsLocation)
+            self.assertEqual(opened, [selected.resolve()])
+            self.assertTrue((selected / 'project.json').is_file())
+            chooser.assert_called_once_with(None, settings, default)
+            key, value = settings.setValue.call_args.args
+            self.assertEqual(key, app.RECENT_PROJECTS_KEY)
+            self.assertEqual(json.loads(value), [str(selected.resolve())])
             window.show.assert_called_once()
             error.assert_not_called()
 
-    def test_saved_library_is_preserved(self):
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
-            saved = Path(directory) / 'existing'
-            result, opened, _, _, location, error = self._launch(directory, saved=str(saved))
-            self.assertEqual(result, 0)
-            self.assertEqual(opened, [saved.resolve()])
-            location.assert_not_called()
-            error.assert_not_called()
-
-    def test_explicit_library_overrides_saved_without_changing_setting(self):
+    def test_explicit_project_bypasses_chooser_and_recent_settings(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             explicit = Path(directory) / 'override'
-            result, opened, settings, _, location, error = self._launch(
-                directory, saved=str(Path(directory) / 'saved'), explicit=explicit,
-            )
+            result, opened, settings, _, chooser, error, _ = self._launch(directory, explicit=explicit)
             self.assertEqual(result, 0)
             self.assertEqual(opened, [explicit.resolve()])
+            chooser.assert_not_called()
             settings.setValue.assert_not_called()
-            location.assert_not_called()
             error.assert_not_called()
 
-    def test_unavailable_documents_reports_error_without_remembering_path(self):
+    def test_cancel_project_chooser_exits_without_creating_project(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
-            result, opened, settings, window, _, error = self._launch(directory, documents='')
-            self.assertEqual(result, 1)
+            result, opened, settings, window, chooser, error, _ = self._launch(directory, selected=None)
+            self.assertEqual(result, 0)
             self.assertEqual(opened, [])
+            chooser.assert_called_once()
             settings.setValue.assert_not_called()
             window.show.assert_not_called()
-            error.assert_called_once()
+            error.assert_not_called()
 
-    def test_creation_failure_reports_error_without_remembering_path(self):
+    def test_recent_projects_are_deduplicated_and_include_legacy_library(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
-            (Path(directory) / 'Documents').write_text('A file blocks directory creation')
-            result, opened, settings, window, _, error = self._launch(directory)
-            self.assertEqual(result, 1)
-            self.assertEqual(opened, [])
-            settings.setValue.assert_not_called()
-            window.show.assert_not_called()
-            error.assert_called_once()
+            root = Path(directory)
+            newest = root / 'Newest'
+            legacy = root / 'Legacy'
+            newest.mkdir()
+            legacy.mkdir()
+            settings = Mock()
+            settings.value.side_effect = lambda key, default=None: {
+                app.RECENT_PROJECTS_KEY: json.dumps([str(newest), str(legacy), str(newest)]),
+                app.LEGACY_LIBRARY_KEY: str(legacy),
+            }.get(key, default)
+            self.assertEqual(app.recent_projects(settings), [str(newest.resolve()), str(legacy.resolve())])
+
+    def test_remember_project_keeps_only_ten_paths(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            roots = []
+            for index in range(12):
+                path = Path(directory) / str(index)
+                path.mkdir()
+                roots.append(path)
+            settings = Mock()
+            settings.value.side_effect = lambda key, default=None: (
+                json.dumps([str(path) for path in roots]) if key == app.RECENT_PROJECTS_KEY else default
+            )
+            app.remember_project(settings, roots[-1])
+            saved = json.loads(settings.setValue.call_args.args[1])
+            self.assertEqual(saved[0], str(roots[-1].resolve()))
+            self.assertEqual(len(saved), 10)
+
+
+if __name__ == '__main__':
+    unittest.main()

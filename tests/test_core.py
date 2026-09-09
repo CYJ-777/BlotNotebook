@@ -1,5 +1,8 @@
 import copy
 import csv
+import hashlib
+import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -112,7 +115,7 @@ class StorageTests(unittest.TestCase):
         self.s = Store(self.root / 'library')
 
     def tearDown(self):
-        self.s.db.close()
+        self.s.close()
         self.tmp.cleanup()
 
     def test_roundtrip_search_audit_and_optimistic_lock(self):
@@ -125,11 +128,29 @@ class StorageTests(unittest.TestCase):
         stale = copy.deepcopy(e)
         e['proteins'][0]['values']['2'] = 70
         self.s.save(e)
-        self.assertTrue(any(h['kind'] == 'raw_value' and h['old_value'] == '60.0' and h['new_value'] == '70' for h in self.s.history(e['id'])))
+        self.assertTrue(any(
+            h['kind'] == 'raw_value'
+            and json.loads(h['old_value']) == 60
+            and json.loads(h['new_value']) == 70
+            for h in self.s.history(e['id'])
+        ))
         with self.assertRaises(ValueError):
             self.s.save(stale)
         self.assertEqual(self.s.load(e['id'])['proteins'][0]['values']['2'], 70)
-        self.assertEqual(self.s.db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+        self.assertEqual(self.s.healthcheck(), 'ok')
+        document = self.root / 'library' / 'experiments' / e['folder'] / 'experiment.json'
+        self.assertTrue(document.is_file())
+        self.assertFalse((self.root / 'library' / 'wbquant.sqlite3').exists())
+        self.assertTrue(document.with_name('experiment.json.bak').is_file())
+        record = json.loads(document.read_text(encoding='utf-8'))
+        self.assertEqual(record['schema_version'], 1)
+        self.assertEqual(record['experiment']['id'], e['id'])
+
+    def test_project_write_lock_rejects_concurrent_save(self):
+        e = example()
+        with self.s._write_lock(), self.assertRaisesRegex(ValueError, 'another window'):
+            self.s.save(e)
+        self.assertIsNone(self.s.load(e['id']))
 
     def test_archive_same_filename_and_relocation(self):
         e = example()
@@ -142,49 +163,39 @@ class StorageTests(unittest.TestCase):
         self.s.save(e)
         self.assertNotEqual(e['files'][0]['archive'], e['files'][1]['archive'])
         self.assertEqual([f['filename'] for f in e['files']], ['original.tif', 'original.tif'])
+        self.assertTrue(all(Path(f['archive']).parts[-2] == 'originals' for f in e['files']))
+        self.assertTrue(all(f['id'] not in Path(f['archive']).parts for f in e['files']))
         import shutil
-        self.s.db.close()
+        self.s.close()
         shutil.copytree(self.root / 'library', self.root / 'moved')
         self.s = Store(self.root / 'moved')
         loaded = self.s.load(e['id'])
         self.assertEqual(self.s.archived_path(loaded['files'][0]).read_bytes(), b'original exposure 1')
         self.assertEqual(self.s.archived_path(loaded['files'][1]).read_bytes(), b'original exposure 2')
 
-    def test_new_archives_are_flat_and_same_names_get_stable_suffixes(self):
-        e = example()
-        first_source = self.root / 'first.tif'
-        second_source = self.root / 'second.tif'
-        first_source.write_bytes(b'first')
-        second_source.write_bytes(b'second')
-        first = self.s.archive_file(e, first_source)
-        second = self.s.archive_file(e, second_source)
-        self.assertEqual(Path(first['archive']).parts[-2], 'originals')
-        self.assertEqual(Path(second['archive']).parts[-2], 'originals')
-        self.assertNotEqual(first['archive'], second['archive'])
-        self.assertEqual(self.s.archived_path(first).read_bytes(), b'first')
-        self.assertEqual(self.s.archived_path(second).read_bytes(), b'second')
-
-    def test_migrates_nested_attachment_folder_to_flat_archive(self):
+    def test_migrates_nested_json_archive_to_flat_layout(self):
         e = example()
         source = self.root / 'nested.tif'
         source.write_bytes(b'nested bytes')
-        f = self.s.archive_file(e, source)
-        e['files'] = [f]
+        attachment = self.s.archive_file(e, source)
+        e['files'] = [attachment]
         self.s.save(e)
-        flat = self.s.archived_path(f)
-        nested = flat.parent / f['id'] / flat.name
+        document = self.root / 'library' / 'experiments' / e['folder'] / 'experiment.json'
+        flat = self.s.archived_path(attachment)
+        nested = flat.parent / attachment['id'] / flat.name
         nested.parent.mkdir()
         flat.rename(nested)
-        legacy_archive = f"experiments/{e['folder']}/originals/{f['id']}/{flat.name}"
-        self.s.db.execute('UPDATE original_files SET archive=? WHERE id=?', (legacy_archive, f['id']))
-        self.s.db.commit()
-        self.s.db.close()
+        record = json.loads(document.read_text(encoding='utf-8'))
+        nested_relative = nested.relative_to(self.s.root).as_posix()
+        record['experiment']['files'][0]['archive'] = nested_relative
+        document.write_text(json.dumps(record, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
         self.s = Store(self.root / 'library')
-        loaded = self.s.load(e['id'])
-        migrated = loaded['files'][0]
+        migrated = self.s.load(e['id'])['files'][0]
         self.assertEqual(Path(migrated['archive']).parts[-2], 'originals')
-        self.assertNotIn(f['id'], Path(migrated['archive']).parts)
+        self.assertNotIn(attachment['id'], Path(migrated['archive']).parts)
         self.assertEqual(self.s.archived_path(migrated).read_bytes(), b'nested bytes')
+        self.assertFalse(nested.exists())
 
     def test_linked_archive_renames_without_touching_original_or_ids(self):
         e = example()
@@ -248,12 +259,11 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(calculate(loaded, loaded['analyses'][0]), expected)
         self.assertEqual(source.read_bytes(), b'original bytes')
         self.assertEqual(self.s.archived_path(first).read_bytes(), b'original bytes')
-        import json
         removals = [h for h in self.s.history(e['id']) if h['kind'] == 'file_removed']
         self.assertEqual(len(removals), 1)
         self.assertEqual(json.loads(removals[0]['old_value'])['id'], first['id'])
         self.assertEqual(removals[0]['new_value'], 'null')
-        self.assertEqual(list(self.s.db.execute('PRAGMA foreign_key_check')), [])
+        self.assertEqual(self.s.healthcheck(), 'ok')
         snapshot = copy.deepcopy(e)
         with self.assertRaises(ValueError):
             remove_attachment(e, first['id'])
@@ -272,8 +282,6 @@ class StorageTests(unittest.TestCase):
         self.s.delete(e['id'])
         self.assertIsNone(self.s.load(e['id']))
         self.assertFalse(archive_dir.exists())
-        self.assertEqual(list(self.s.db.execute('PRAGMA foreign_key_check')), [])
-        self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM audit_log WHERE experiment_id=?', (e['id'],)).fetchone()[0], 0)
         with self.assertRaises(ValueError):
             self.s.delete(e['id'])
 
@@ -299,31 +307,89 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(loaded['folder'], folder_before)
         self.assertEqual(self.s.archived_path(loaded['files'][0]).read_bytes(), b'stable bytes')
 
-    def test_migrates_legacy_archive_folder(self):
+    def test_imports_legacy_sqlite_without_modifying_database(self):
+        """Import all relational records while preserving the source database byte-for-byte."""
+        legacy_root = self.root / 'legacy-library'
+        legacy_root.mkdir()
+        database = legacy_root / 'wbquant.sqlite3'
         e = example()
-        e.update(id='261583e2-0000-0000-0000-000000000000', date='2026-09-08', cell='PC9', condition='MG132')
-        source = self.root / 'legacy.tif'
-        source.write_bytes(b'legacy bytes')
-        f = self.s.archive_file(e, source)
-        e['files'] = [f]
-        self.s.save(e)
-        readable = e['folder']
-        old_dir = self.root / 'library' / 'experiments' / readable
-        legacy_dir = self.root / 'library' / 'experiments' / e['id']
-        old_dir.rename(legacy_dir)
-        legacy_archive = f"experiments/{e['id']}/originals/{f['id']}/legacy.tif"
-        legacy_file = legacy_dir / 'originals' / f['id'] / 'legacy.tif'
-        legacy_file.parent.mkdir()
-        (legacy_dir / 'originals' / Path(f['archive']).name).rename(legacy_file)
-        self.s.db.execute("UPDATE experiments SET folder=NULL WHERE id=?", (e['id'],))
-        self.s.db.execute("UPDATE original_files SET archive=? WHERE id=?", (legacy_archive, f['id']))
-        self.s.db.commit()
-        self.s.db.close()
-        self.s = Store(self.root / 'library')
-        loaded = self.s.load(e['id'])
-        self.assertTrue(loaded['folder'])
-        self.assertTrue((self.root / 'library' / 'experiments' / loaded['folder']).exists())
-        self.assertEqual(self.s.archived_path(loaded['files'][0]).read_bytes(), b'legacy bytes')
+        e.update(folder='legacy-folder', revision=4)
+        attachment_id = uid()
+        nested_relative = Path('experiments') / e['folder'] / 'originals' / attachment_id / 'legacy.tif'
+        nested_source = legacy_root / nested_relative
+        nested_source.parent.mkdir(parents=True)
+        nested_source.write_bytes(b'legacy bytes')
+        attachment = {
+            'id': attachment_id, 'filename': 'legacy.tif',
+            'original_path': '/old/computer/legacy.tif', 'extension': '.tif',
+            'added': now(), 'archive': nested_relative.as_posix(),
+            'sha256': hashlib.sha256(b'legacy bytes').hexdigest(),
+        }
+        e['files'] = [attachment]
+        e['proteins'][0]['source_ids'] = [attachment_id]
+        connection = sqlite3.connect(database)
+        connection.executescript('''
+            PRAGMA user_version=2;
+            CREATE TABLE experiments(id TEXT PRIMARY KEY,date TEXT,cell TEXT,condition TEXT,notes TEXT,created TEXT,updated TEXT,revision INTEGER,folder TEXT);
+            CREATE TABLE lanes(experiment_id TEXT,number INTEGER,name TEXT);
+            CREATE TABLE protein_rows(id TEXT,experiment_id TEXT,name TEXT,label TEXT,position INTEGER);
+            CREATE TABLE raw_values(protein_id TEXT,lane INTEGER,value REAL);
+            CREATE TABLE imports(id TEXT,protein_id TEXT,added TEXT,column_name TEXT,raw_text TEXT);
+            CREATE TABLE original_files(id TEXT,experiment_id TEXT,filename TEXT,original_path TEXT,extension TEXT,added TEXT,archive TEXT,sha256 TEXT);
+            CREATE TABLE protein_sources(protein_id TEXT,file_id TEXT);
+            CREATE TABLE normalization_sets(id TEXT,experiment_id TEXT,numerator TEXT,denominator TEXT,position INTEGER);
+            CREATE TABLE normalization_groups(id TEXT,set_id TEXT,name TEXT,reference_lane INTEGER,position INTEGER);
+            CREATE TABLE group_members(group_id TEXT,lane INTEGER);
+            CREATE TABLE audit_log(id INTEGER PRIMARY KEY,experiment_id TEXT,changed TEXT,kind TEXT,object_key TEXT,old_value TEXT,new_value TEXT);
+        ''')
+        connection.execute('INSERT INTO experiments VALUES(?,?,?,?,?,?,?,?,?)',
+                           (e['id'], e['date'], e['cell'], e['condition'], e['notes'], e['created'], e['updated'], e['revision'], e['folder']))
+        connection.executemany('INSERT INTO lanes VALUES(?,?,?)',
+                               [(e['id'], lane['number'], lane['name']) for lane in e['lanes']])
+        for position, protein in enumerate(e['proteins']):
+            connection.execute('INSERT INTO protein_rows VALUES(?,?,?,?,?)',
+                               (protein['id'], e['id'], protein['name'], protein['label'], position))
+            connection.executemany('INSERT INTO raw_values VALUES(?,?,?)',
+                                   [(protein['id'], int(lane), value) for lane, value in protein['values'].items()])
+            connection.executemany('INSERT INTO protein_sources VALUES(?,?)',
+                                   [(protein['id'], file_id) for file_id in protein['source_ids']])
+        connection.execute('INSERT INTO original_files VALUES(?,?,?,?,?,?,?,?)',
+                           (attachment['id'], e['id'], attachment['filename'], attachment['original_path'],
+                            attachment['extension'], attachment['added'], attachment['archive'], attachment['sha256']))
+        for position, analysis in enumerate(e['analyses']):
+            connection.execute('INSERT INTO normalization_sets VALUES(?,?,?,?,?)',
+                               (analysis['id'], e['id'], analysis['num'], analysis['den'], position))
+            for group_position, group in enumerate(analysis['groups']):
+                connection.execute('INSERT INTO normalization_groups VALUES(?,?,?,?,?)',
+                                   (group['id'], analysis['id'], group['name'], group['ref'], group_position))
+                connection.executemany('INSERT INTO group_members VALUES(?,?)',
+                                       [(group['id'], lane) for lane in group['lanes']])
+        connection.commit()
+        connection.close()
+        before = hashlib.sha256(database.read_bytes()).hexdigest()
+
+        imported = Store(legacy_root)
+        loaded = imported.load(e['id'])
+        expected = copy.deepcopy(e)
+        flattened_name = archive_display_name(expected['files'][0], expected['proteins'])
+        expected['files'][0]['archive'] = f"experiments/{e['folder']}/originals/{flattened_name}"
+        self.assertEqual(loaded, expected)
+        self.assertEqual(imported.project['migrated_from'], 'wbquant.sqlite3')
+        self.assertTrue((legacy_root / 'project.json').is_file())
+        self.assertTrue((legacy_root / 'experiments' / e['folder'] / 'experiment.json').is_file())
+        self.assertEqual(hashlib.sha256(database.read_bytes()).hexdigest(), before)
+        self.assertTrue(nested_source.is_file())
+        self.assertEqual(imported.archived_path(loaded['files'][0]).read_bytes(), b'legacy bytes')
+
+    def test_rejects_invalid_or_newer_project_json(self):
+        for payload in [
+            {'format': 'something-else', 'schema_version': 1},
+            {'format': 'blot-notebook-project', 'schema_version': 999},
+        ]:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as directory:
+                Path(directory, 'project.json').write_text(json.dumps(payload), encoding='utf-8')
+                with self.assertRaises(ValueError):
+                    Store(directory)
 
 
 if __name__ == '__main__':

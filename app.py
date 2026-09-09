@@ -18,6 +18,11 @@ from PySide6.QtWidgets import (
 from core import Store, fresh, uid, now, label, number, parse_biorad, table_headers, DEFAULT_COLUMN, calculate, calculate_group, export_csv, validate, remove_attachment
 
 
+RECENT_PROJECTS_KEY = 'recentProjects'
+LEGACY_LIBRARY_KEY = 'library'
+MAX_RECENT_PROJECTS = 10
+
+
 STYLE = '''
 QWidget {font-family: Arial, Aptos, sans-serif; font-size: 15px; color: #17191d;}
 QMainWindow, QDialog {background: #f3f4f6;}
@@ -116,6 +121,121 @@ def table(headers, editable=False):
     t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     t.horizontalHeader().setStretchLastSection(True)
     return t
+
+
+def default_project_path():
+    """Return the initial Documents/BlotNotebook project path, if available."""
+    documents = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+    return Path(documents) / 'BlotNotebook' if documents else None
+
+
+def recent_projects(settings, default=None):
+    """Return existing recent project paths, newest first, with legacy-setting migration."""
+    value = settings.value(RECENT_PROJECTS_KEY, [])
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = [value]
+    candidates = list(value or [])
+    legacy = settings.value(LEGACY_LIBRARY_KEY)
+    if legacy:
+        candidates.append(legacy)
+    if default is not None:
+        candidates.append(str(default))
+    result = []
+    for candidate in candidates:
+        path = str(Path(candidate).expanduser().resolve())
+        if path not in result and (Path(path).exists() or default is not None and Path(path) == Path(default).resolve()):
+            result.append(path)
+    return result[:MAX_RECENT_PROJECTS]
+
+
+def remember_project(settings, path):
+    """Move a project path to the front of the persisted recent-project list."""
+    resolved = str(Path(path).expanduser().resolve())
+    projects = [resolved] + [item for item in recent_projects(settings) if item != resolved]
+    settings.setValue(RECENT_PROJECTS_KEY, json.dumps(projects[:MAX_RECENT_PROJECTS], ensure_ascii=False))
+
+
+class ProjectDialog(QDialog):
+    """Choose a recent project or browse to a project folder."""
+
+    def __init__(self, parent, settings, default=None):
+        super().__init__(parent)
+        self.selected_path = None
+        self.setWindowTitle('Open Blot Notebook Project')
+        self.resize(680, 430)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(14)
+        layout.addWidget(heading('Choose a project'))
+        layout.addWidget(hint('Each project is a self-contained folder with JSON experiment files and archived originals.'))
+        self.projects = QListWidget()
+        for path_text in recent_projects(settings, default):
+            path = Path(path_text)
+            item = QListWidgetItem(f'{path.name or path}\n{path}')
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            self.projects.addItem(item)
+        self.projects.itemDoubleClicked.connect(lambda *_: self.open_selected())
+        if self.projects.count():
+            self.projects.setCurrentRow(0)
+        layout.addWidget(self.projects, 1)
+        actions = QHBoxLayout()
+        actions.addWidget(button('New project…', self.new_project))
+        actions.addWidget(button('Open other project…', self.open_other))
+        actions.addStretch()
+        actions.addWidget(button('Open selected', self.open_selected, True))
+        layout.addLayout(actions)
+        cancel = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        cancel.rejected.connect(self.reject)
+        layout.addWidget(cancel)
+
+    def open_selected(self):
+        """Accept the currently highlighted recent project."""
+        item = self.projects.currentItem()
+        if item is not None:
+            self.selected_path = Path(item.data(Qt.ItemDataRole.UserRole))
+            self.accept()
+
+    def open_other(self):
+        """Browse to an existing JSON project or legacy SQLite library."""
+        path = QFileDialog.getExistingDirectory(self, 'Open Blot Notebook project')
+        if not path:
+            return
+        selected = Path(path)
+        if not (selected / 'project.json').is_file() and not (selected / 'wbquant.sqlite3').is_file():
+            QMessageBox.warning(self, 'Not a project', 'Choose a folder containing project.json or wbquant.sqlite3.')
+            return
+        self.selected_path = selected
+        self.accept()
+
+    def new_project(self):
+        """Browse to a new or empty folder that will become a JSON project."""
+        path = QFileDialog.getExistingDirectory(self, 'Choose or create a new project folder')
+        if not path:
+            return
+        selected = Path(path)
+        if (selected / 'project.json').exists() or (selected / 'wbquant.sqlite3').exists():
+            QMessageBox.warning(self, 'Project already exists', 'Use Open other project to open this folder.')
+            return
+        if any(selected.iterdir()):
+            answer = QMessageBox.question(
+                self, 'Folder is not empty',
+                'Create a Blot Notebook project in this non-empty folder?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.selected_path = selected
+        self.accept()
+
+
+def choose_project(parent, settings, default=None):
+    """Show the project chooser and return the selected path, or None on cancel."""
+    dialog = ProjectDialog(parent, settings, default)
+    return dialog.selected_path if dialog.exec() == QDialog.DialogCode.Accepted else None
 
 
 def fill(t, rows):
@@ -384,8 +504,9 @@ class GroupDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, root):
+    def __init__(self, root, settings=None):
         super().__init__()
+        self.settings = settings or QSettings()
         self.store = Store(root)
         self.exp = None
         self.dirty = False
@@ -409,7 +530,16 @@ class MainWindow(QMainWindow):
         brand = QLabel('Blot Notebook')
         brand.setObjectName('title')
         sl.addWidget(brand)
-        sl.addWidget(hint('Your local experiment library'))
+        sl.addWidget(hint('Your local JSON project'))
+        self.project_name = QLabel(self.store.name)
+        self.project_name.setObjectName('section')
+        sl.addWidget(self.project_name)
+        self.project_path = hint(str(self.store.root))
+        self.project_path.setToolTip(str(self.store.root))
+        sl.addWidget(self.project_path)
+        switch = button('Switch project…', self.switch_project)
+        switch.setObjectName('quiet')
+        sl.addWidget(switch)
         sl.addSpacing(10)
         sl.addWidget(button('+ New experiment', self.new_experiment, True))
         self.search = QLineEdit()
@@ -420,7 +550,7 @@ class MainWindow(QMainWindow):
         self.experiments = QListWidget()
         self.experiments.itemClicked.connect(self.select_experiment)
         sl.addWidget(self.experiments, 1)
-        library = button('Open library folder', self.open_library)
+        library = button('Open project folder', self.open_library)
         library.setObjectName('quiet')
         sl.addWidget(library)
         sl.addWidget(hint('Stored on this computer'))
@@ -437,7 +567,7 @@ class MainWindow(QMainWindow):
         self.workspace_title = QLabel('Ready for your next blot')
         self.workspace_title.setObjectName('title')
         title_column.addWidget(self.workspace_title)
-        self.workspace_subtitle = hint('Create an experiment or open one from the library.')
+        self.workspace_subtitle = hint('Create an experiment or open one from this project.')
         title_column.addWidget(self.workspace_subtitle)
         top.addLayout(title_column, 1)
         self.delete_button = button('Delete experiment', self.delete_experiment)
@@ -454,7 +584,7 @@ class MainWindow(QMainWindow):
         self.build_norm()
         self.build_history()
         self.tabs.setEnabled(False)
-        self.statusBar().showMessage('Create an experiment or select one from your library.')
+        self.statusBar().showMessage('Create an experiment or select one from this project.')
         QShortcut(QKeySequence.StandardKey.Save, self, activated=self.save)
         self.refresh_list()
 
@@ -673,7 +803,7 @@ class MainWindow(QMainWindow):
         title = self.exp['cell'] or 'Untitled experiment'
         answer = QMessageBox.question(
             self, 'Delete experiment',
-            f'Delete "{title}"?\n\nThis removes the experiment and its archived copies from your library. Original files are not touched.',
+            f'Delete "{title}"?\n\nThis removes the experiment and its archived copies from this project. Original files are not touched.',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
@@ -687,7 +817,7 @@ class MainWindow(QMainWindow):
         self.dirty = False
         self.tabs.setEnabled(False)
         self.workspace_title.setText('Ready for your next blot')
-        self.workspace_subtitle.setText('Create an experiment or open one from the library.')
+        self.workspace_subtitle.setText('Create an experiment or open one from this project.')
         self.identity.setText('')
         self.cell.clear()
         self.condition.clear()
@@ -742,10 +872,38 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self.can_leave():
-            self.store.db.close()
+            self.store.close()
             event.accept()
         else:
             event.ignore()
+
+    def switch_project(self):
+        """Prompt for a project and replace the active project without restarting."""
+        if not self.can_leave():
+            return
+        selected = choose_project(self, self.settings, default_project_path())
+        if selected is None or selected.resolve() == self.store.root:
+            return
+        try:
+            new_store = Store(selected)
+        except Exception as exc:
+            self.error(exc)
+            return
+        self.store.close()
+        self.store = new_store
+        remember_project(self.settings, selected)
+        self.project_name.setText(self.store.name)
+        self.project_path.setText(str(self.store.root))
+        self.project_path.setToolTip(str(self.store.root))
+        self.exp = None
+        self.dirty = False
+        self.tabs.setEnabled(False)
+        self.delete_button.setEnabled(False)
+        self.workspace_title.setText('Ready for your next blot')
+        self.workspace_subtitle.setText('Create an experiment or open one from this project.')
+        self.search.clear()
+        self.refresh_list()
+        self.statusBar().showMessage('Opened project · ' + str(self.store.root))
 
     def refresh_list(self, *_):
         self.experiments.clear()
@@ -910,7 +1068,7 @@ class MainWindow(QMainWindow):
         try:
             path = Path(f['original_path']).parent if original else self.store.archived_path(f)
             if not path.exists():
-                raise ValueError('This location is unavailable. The archived copy may still be available in your library.')
+                raise ValueError('This location is unavailable. The archived copy may still be available in your project.')
             if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
                 raise ValueError('No application could open this file. Use Library folder to locate the archived copy.')
         except Exception as exc:
@@ -946,7 +1104,7 @@ class MainWindow(QMainWindow):
         if QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.store.root))):
             self.statusBar().showMessage('✓ Library folder opened')
         else:
-            self.error('Could not open the library folder.')
+            self.error('Could not open the project folder.')
 
     def selected_protein(self):
         r = self.raw.currentRow()
@@ -1274,7 +1432,8 @@ class MainWindow(QMainWindow):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--library', help='Local library folder containing the SQLite database and originals')
+    parser.add_argument('--project', '--library', dest='project',
+                        help='Project folder containing JSON experiments and archived originals')
     parser.add_argument('--smoke-test', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
@@ -1285,23 +1444,26 @@ def main():
     app.setStyleSheet(STYLE)
     settings = QSettings()
     try:
-        root = args.library or settings.value('library')
-        if not root:
-            documents = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
-            if not documents:
-                raise RuntimeError('Cannot locate your Documents folder. Start with --library to specify a folder.')
-            root = Path(documents) / 'BlotNotebook'
-        window = MainWindow(root)
+        if args.project:
+            root = Path(args.project)
+        else:
+            default = default_project_path()
+            if default is None:
+                raise RuntimeError('Cannot locate your Documents folder. Start with --project to specify a folder.')
+            root = choose_project(None, settings, default)
+            if root is None:
+                return 0
+        window = MainWindow(root, settings)
     except Exception as exc:
-        QMessageBox.critical(None, 'Cannot open library', str(exc))
+        QMessageBox.critical(None, 'Cannot open project', str(exc))
         return 1
-    if not args.library:
-        settings.setValue('library', str(Path(root).resolve()))
+    if not args.project:
+        remember_project(settings, root)
     if args.smoke_test:
         from PySide6.QtGui import QFontDatabase
         window.ensurePolished()
-        report = dict(started=True, tabs=window.tabs.count(), database=str(window.store.root / 'wbquant.sqlite3'),
-                      integrity=window.store.db.execute('PRAGMA integrity_check').fetchone()[0],
+        report = dict(started=True, tabs=window.tabs.count(), project=str(window.store.root / 'project.json'),
+                      integrity=window.store.healthcheck(),
                       available_fonts=len(QFontDatabase.families()))
         (window.store.root / 'smoke-test.json').write_text(json.dumps(report), encoding='utf-8')
         window.grab().save(str(window.store.root / 'smoke-test.png'))
