@@ -5,8 +5,8 @@ import json
 import html
 import sys
 from pathlib import Path
-from PySide6.QtCore import Qt, QDate, QUrl, QSettings, QTimer, QMimeData, QStandardPaths
-from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut, QColor
+from PySide6.QtCore import Qt, QDate, QUrl, QSettings, QTimer, QMimeData, QRect, QStandardPaths
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut, QColor, QPainter, QPen, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QPushButton, QLineEdit, QTextEdit, QPlainTextEdit, QComboBox,
@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QInputDialog, QAbstractItemView, QHeaderView,
     QCompleter, QCheckBox, QMenu, QScrollArea, QFrame,
 )
-from core import Store, fresh, uid, now, label, number, parse_biorad, table_headers, DEFAULT_COLUMN, calculate, export_csv, validate, remove_attachment
+from core import Store, fresh, uid, now, label, number, parse_biorad, table_headers, DEFAULT_COLUMN, calculate, calculate_group, export_csv, validate, remove_attachment
 
 
 STYLE = '''
@@ -54,6 +54,12 @@ QMenu::item:selected {background: #e4eef8;}
 QSplitter::handle {background: transparent;}
 QStatusBar {color: #657080; font-size: 12px;}
 '''
+
+
+def asset_path(name):
+    """Locate a bundled visual asset in both source and PyInstaller builds."""
+    base = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+    return base / 'assets' / name
 
 
 
@@ -127,7 +133,8 @@ def fill(t, rows):
 
 
 def formatted(value):
-    return '' if value is None else format(value, '.10g')
+    """Presentation format for normalized values; stored values keep full precision."""
+    return '' if value is None else format(value, '.3f')
 
 
 def sample_color(name):
@@ -141,7 +148,7 @@ def protein_display_names(proteins):
 
 
 def relative_clipboard(rows, with_names=False):
-    values = ['' if r['relative'] is None else str(r['relative']) for r in rows]
+    values = [formatted(r['relative']) for r in rows]
     def safe_name(name):
         return "'" + name if name.lstrip().startswith(('=', '+', '-', '@')) else name
     lines = []
@@ -170,6 +177,32 @@ class DropArea(QLabel):
     def dropEvent(self, event):
         self.callback([u.toLocalFile() for u in event.mimeData().urls()])
         event.acceptProposedAction()
+
+
+class ClearCheckBox(QCheckBox):
+    """A shared, compact checkbox: white square, subtle outline, visible tick."""
+    def __init__(self, text='', parent=None):
+        super().__init__(text, parent)
+        self.setMinimumHeight(30)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        edge = 16
+        box = QRect(4, (self.height() - edge) // 2, edge, edge)
+        # Keep the whole row visually neutral. Only the small square changes state.
+        painter.setPen(QPen(QColor('#9aa5b1' if not self.hasFocus() else '#6d8bad'), 1.2))
+        painter.setBrush(QColor('#ffffff' if not self.underMouse() else '#fafcff'))
+        painter.drawRoundedRect(box, 3, 3)
+        if self.isChecked():
+            painter.setPen(QPen(QColor('#356b9a'), 1.9, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawLine(box.left() + 3, box.center().y(), box.left() + 6.5, box.bottom() - 4)
+            painter.drawLine(box.left() + 6.5, box.bottom() - 4, box.right() - 3, box.top() + 4)
+        painter.setPen(QColor('#17191d') if self.isEnabled() else QColor('#929ba6'))
+        painter.drawText(box.right() + 9, 0, self.width() - box.right() - 9, self.height(),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text())
 
 
 class PasteDialog(QDialog):
@@ -256,15 +289,23 @@ class ProteinDialog(QDialog):
         form.addRow('Measurement / exposure', self.exposure)
         layout.addLayout(form)
         layout.addWidget(hint('Link original files to this measurement (optional). Multiple files may be selected.'))
-        self.sources = QListWidget()
+        self.source_checks = {}
+        source_box = QWidget()
+        source_layout = QVBoxLayout(source_box)
+        source_layout.setContentsMargins(0, 0, 0, 0)
+        source_layout.setSpacing(4)
         for f in exp['files']:
-            item = QListWidgetItem(f['filename'])
-            item.setData(Qt.ItemDataRole.UserRole, f['id'])
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if existing and f['id'] in existing['source_ids'] else Qt.CheckState.Unchecked)
-            item.setToolTip(f['original_path'])
-            self.sources.addItem(item)
-        layout.addWidget(self.sources)
+            check = ClearCheckBox(f['filename'])
+            check.setChecked(bool(existing and f['id'] in existing['source_ids']))
+            check.setToolTip(f['original_path'])
+            self.source_checks[f['id']] = check
+            source_layout.addWidget(check)
+        source_layout.addStretch()
+        source_scroll = QScrollArea()
+        source_scroll.setWidgetResizable(True)
+        source_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        source_scroll.setWidget(source_box)
+        layout.addWidget(source_scroll, 1)
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         box.accepted.connect(self.accept_valid)
         box.rejected.connect(self.reject)
@@ -278,11 +319,11 @@ class ProteinDialog(QDialog):
 
     def data(self):
         return dict(name=self.name.text().strip(), label=self.exposure.text().strip(),
-                    source_ids=sorted(self.sources.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.sources.count()) if self.sources.item(i).checkState() == Qt.CheckState.Checked))
+                    source_ids=sorted(fid for fid, check in self.source_checks.items() if check.isChecked()))
 
 
 class GroupDialog(QDialog):
-    def __init__(self, parent, exp, occupied, existing=None):
+    def __init__(self, parent, exp, existing=None):
         super().__init__(parent)
         self.setWindowTitle('Normalization group')
         self.resize(480, 510)
@@ -291,21 +332,29 @@ class GroupDialog(QDialog):
         self.name.setPlaceholderText('Group A')
         layout.addWidget(QLabel('Group name'))
         layout.addWidget(self.name)
-        layout.addWidget(hint('Select lanes by number. Identical sample names remain independent.'))
-        self.members = QListWidget()
+        layout.addWidget(hint('Select member lanes. A lane can belong to several groups.'))
+        self.checks = {}
+        members = QWidget()
+        members_layout = QVBoxLayout(members)
+        members_layout.setContentsMargins(0, 0, 0, 0)
+        members_layout.setSpacing(6)
         for l in exp['lanes']:
-            if l['number'] in occupied:
-                continue
-            item = QListWidgetItem(f"L{l['number']} · {l['name']}")
-            item.setData(Qt.ItemDataRole.UserRole, l['number'])
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if existing and l['number'] in existing['lanes'] else Qt.CheckState.Unchecked)
-            self.members.addItem(item)
-        layout.addWidget(self.members)
-        layout.addWidget(QLabel('Reference lane (relative expression = 1)'))
+            cb = ClearCheckBox(f"L{l['number']} · {l['name']}")
+            if existing and l['number'] in existing['lanes']:
+                cb.setChecked(True)
+            self.checks[l['number']] = cb
+            members_layout.addWidget(cb)
+        members_layout.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(members)
+        layout.addWidget(scroll, 1)
+        layout.addWidget(QLabel('Reference lane (may be outside this group)'))
         self.reference = QComboBox()
         layout.addWidget(self.reference)
-        self.members.itemChanged.connect(self.update_refs)
+        for cb in self.checks.values():
+            cb.toggled.connect(self.update_refs)
         self.update_refs()
         if existing:
             self.reference.setCurrentIndex(self.reference.findData(existing['ref']))
@@ -314,13 +363,11 @@ class GroupDialog(QDialog):
         box.rejected.connect(self.reject)
         layout.addWidget(box)
 
-    def update_refs(self):
+    def update_refs(self, *_):
         current = self.reference.currentData()
         self.reference.clear()
-        for i in range(self.members.count()):
-            item = self.members.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                self.reference.addItem(item.text(), item.data(Qt.ItemDataRole.UserRole))
+        for lane, cb in self.checks.items():
+            self.reference.addItem(cb.text(), lane)
         index = self.reference.findData(current)
         if index >= 0:
             self.reference.setCurrentIndex(index)
@@ -333,7 +380,7 @@ class GroupDialog(QDialog):
 
     def data(self):
         return dict(name=self.name.text().strip(), ref=self.reference.currentData(),
-                    lanes=[self.members.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.members.count()) if self.members.item(i).checkState() == Qt.CheckState.Checked])
+                    lanes=[lane for lane, cb in self.checks.items() if cb.isChecked()])
 
 
 class MainWindow(QMainWindow):
@@ -344,6 +391,7 @@ class MainWindow(QMainWindow):
         self.dirty = False
         self.rendering = False
         self.setWindowTitle('Blot Notebook')
+        self.setWindowIcon(QIcon(str(asset_path('blotnotebook-seal.png'))))
         self.resize(1320, 860)
         self.setMinimumSize(980, 680)
         outer = QWidget()
@@ -503,8 +551,15 @@ class MainWindow(QMainWindow):
         actions.addWidget(button('Add calculation', self.add_analysis, True))
         v.addLayout(actions)
         self.analysis_choice = QComboBox()
-        self.analysis_choice.currentIndexChanged.connect(self.render_analysis)
+        self.analysis_choice.currentIndexChanged.connect(self.analysis_changed)
         v.addWidget(self.analysis_choice)
+        group_filter_row = QHBoxLayout()
+        group_filter_row.addWidget(QLabel('View group'))
+        self.group_filter = QComboBox()
+        self.group_filter.setToolTip('Changes only the displayed lanes and clipboard output. It does not change the normalization calculation.')
+        self.group_filter.currentIndexChanged.connect(self.group_filter_changed)
+        group_filter_row.addWidget(self.group_filter, 1)
+        v.addLayout(group_filter_row)
         v.addWidget(hint("Ratio = numerator / denominator. Relative expression = ratio / this group's reference ratio."))
         actions = QHBoxLayout()
         actions.addWidget(button('+ Group', self.add_group, True))
@@ -518,10 +573,46 @@ class MainWindow(QMainWindow):
         v.addWidget(self.groups)
         self.results = table(['Lane', 'Sample', 'Group', 'Reference', 'Ratio', 'Relative expression', 'Status'])
         v.addWidget(self.results, 1)
+        horizontal = card(v)
+        horizontal.addWidget(heading('Horizontal relative expression'))
+        sel = QHBoxLayout()
+        sel.addWidget(button('Select all', self.select_all_lanes))
+        sel.addWidget(button('Clear selection', self.clear_lane_selection))
+        sel.addWidget(QLabel('From'))
+        self.from_lane = QSpinBox()
+        self.from_lane.setRange(1, 10000)
+        sel.addWidget(self.from_lane)
+        sel.addWidget(QLabel('To'))
+        self.to_lane = QSpinBox()
+        self.to_lane.setRange(1, 10000)
+        sel.addWidget(self.to_lane)
+        sel.addWidget(button('Apply range', self.apply_lane_range))
+        sel.addStretch()
+        horizontal.addLayout(sel)
+        self.lane_checks = {}
+        lane_box = QWidget()
+        self.lane_layout = QVBoxLayout(lane_box)
+        self.lane_layout.setContentsMargins(0, 0, 0, 0)
+        self.lane_layout.setSpacing(3)
+        lane_scroll = QScrollArea()
+        lane_scroll.setWidgetResizable(True)
+        lane_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        lane_scroll.setWidget(lane_box)
+        lane_scroll.setMaximumHeight(120)
+        horizontal.addWidget(lane_scroll)
+        self.relative_table = QTableWidget(2, 0)
+        self.relative_table.verticalHeader().setVisible(True)
+        self.relative_table.setVerticalHeaderLabels(['Sample', 'Relative expression'])
+        self.relative_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.relative_table.setAlternatingRowColors(True)
+        self.relative_table.setShowGrid(False)
+        self.relative_table.setMinimumHeight(108)
+        self.relative_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.relative_table.horizontalHeader().setVisible(False)
+        self.relative_table.horizontalHeader().setStretchLastSection(False)
+        self.relative_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        horizontal.addWidget(self.relative_table)
         copy_row = QHBoxLayout()
-        copy_label = QLabel('Horizontal copy')
-        copy_label.setObjectName('muted')
-        copy_row.addWidget(copy_label)
         self.copy_values_button = button('Copy values', lambda: self.copy_relative(False))
         self.copy_names_button = button('Copy with sample names', lambda: self.copy_relative(True))
         for b in (self.copy_values_button, self.copy_names_button):
@@ -529,7 +620,7 @@ class MainWindow(QMainWindow):
         copy_row.addWidget(self.copy_values_button)
         copy_row.addWidget(self.copy_names_button)
         copy_row.addStretch()
-        v.addLayout(copy_row)
+        horizontal.addLayout(copy_row)
         v.addWidget(hint('Unassigned lanes retain their ratio but have no relative expression. Zero or missing denominators and invalid references are reported explicitly.'))
 
     def build_history(self):
@@ -607,6 +698,9 @@ class MainWindow(QMainWindow):
         fill(self.raw, [])
         fill(self.groups, [])
         fill(self.results, [])
+        self.relative_table.clear()
+        self.relative_table.setColumnCount(0)
+        self.relative_table.setRowCount(0)
         self.numerator.clear()
         self.denominator.clear()
         self.analysis_choice.clear()
@@ -738,6 +832,8 @@ class MainWindow(QMainWindow):
         if i >= 0:
             self.analysis_choice.setCurrentIndex(i)
         self.analysis_choice.blockSignals(False)
+        self.populate_group_filter()
+        self.populate_lane_selector()
         self.render_analysis()
         self.render_history()
         self.rendering = False
@@ -787,6 +883,7 @@ class MainWindow(QMainWindow):
     def add_files(self, paths):
         if not self.exp:
             return
+        self.sync_fields()
         self.statusBar().showMessage('Archiving original files…')
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         archived = []
@@ -846,7 +943,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage('Attachment removed. Original file untouched; archived copy retained for history.')
 
     def open_library(self):
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.store.root)))
+        if QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.store.root))):
+            self.statusBar().showMessage('✓ Library folder opened')
+        else:
+            self.error('Could not open the library folder.')
 
     def selected_protein(self):
         r = self.raw.currentRow()
@@ -922,6 +1022,13 @@ class MainWindow(QMainWindow):
         aid = self.analysis_choice.currentData()
         return next((a for a in self.exp['analyses'] if a['id'] == aid), None) if self.exp else None
 
+    def analysis_changed(self, *_):
+        if self.rendering:
+            return
+        self.populate_group_filter()
+        self.populate_lane_selector(reset=True)
+        self.render_analysis()
+
     def add_analysis(self):
         n, d = self.numerator.currentData(), self.denominator.currentData()
         if not n or not d:
@@ -941,35 +1048,160 @@ class MainWindow(QMainWindow):
     def render_analysis(self, *_):
         a = self.analysis()
         if not a:
+            self.group_filter.blockSignals(True)
+            self.group_filter.clear()
+            self.group_filter.addItem('All groups', None)
+            self.group_filter.blockSignals(False)
             fill(self.groups, [])
             fill(self.results, [])
-            self.copy_values_button.setEnabled(False)
-            self.copy_names_button.setEnabled(False)
+            self.render_horizontal()
             return
         names = {l['number']: l['name'] for l in self.exp['lanes']}
         fill(self.groups, [(g['name'], ', '.join(f'L{l}' for l in g['lanes']), f"L{g['ref']} · {names[g['ref']]}") for g in a['groups']])
-        rows = calculate(self.exp, a)
+        rows = self.current_result_rows()
         fill(self.results, [(r['lane'], r['sample'], r['group'], r['reference'], formatted(r['ratio']), formatted(r['relative']), r['status']) for r in rows])
         for i, r in enumerate(rows):
             self.results.item(i, 1).setForeground(QColor(sample_color(r['sample'])))
         for i, g in enumerate(a['groups']):
             self.groups.item(i, 2).setForeground(QColor(sample_color(names[g['ref']])))
-        self.copy_values_button.setEnabled(bool(rows))
-        self.copy_names_button.setEnabled(bool(rows))
+        self.render_horizontal()
+
+    def populate_group_filter(self):
+        a = self.analysis()
+        previous = self.group_filter.currentData()
+        self.group_filter.blockSignals(True)
+        self.group_filter.clear()
+        self.group_filter.addItem('All groups', None)
+        if a:
+            for group in a['groups']:
+                self.group_filter.addItem(group['name'], group['id'])
+        index = self.group_filter.findData(previous)
+        self.group_filter.setCurrentIndex(index if index >= 0 else 0)
+        self.group_filter.blockSignals(False)
+
+    def current_group(self):
+        a = self.analysis()
+        group_id = self.group_filter.currentData()
+        return next((group for group in (a or {}).get('groups', []) if group['id'] == group_id), None)
+
+    def current_result_rows(self):
+        a = self.analysis()
+        if not a:
+            return []
+        group = self.current_group()
+        if group:
+            return calculate_group(self.exp, a, group)
+        if not a['groups']:
+            return calculate(self.exp, a)
+        rows, assigned = [], set()
+        for item in a['groups']:
+            rows.extend(calculate_group(self.exp, a, item))
+            assigned.update(item['lanes'])
+        rows.extend(row for row in calculate(self.exp, a) if row['lane'] not in assigned)
+        return rows
+
+    def group_filter_changed(self, *_):
+        if self.rendering:
+            return
+        self.populate_lane_selector(reset=True)
+        self.render_analysis()
+
+    def populate_lane_selector(self, reset=False):
+        if not self.exp:
+            self.lane_checks.clear()
+            return
+        eid = self.exp['id']
+        allowed = set(self.current_group()['lanes']) if self.current_group() else {lane['number'] for lane in self.exp['lanes']}
+        if reset or getattr(self, 'lane_selector_experiment_id', None) != eid:
+            self.lane_selector_experiment_id = eid
+            selected = None
+        else:
+            selected = {lane for lane, cb in self.lane_checks.items() if cb.isChecked()} & allowed
+        while self.lane_layout.count():
+            item = self.lane_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.lane_checks = {}
+        for l in self.exp['lanes']:
+            if l['number'] not in allowed:
+                continue
+            cb = ClearCheckBox(f"L{l['number']} · {l['name']}")
+            cb.setChecked(selected is None or l['number'] in selected)
+            cb.toggled.connect(self.render_horizontal)
+            self.lane_checks[l['number']] = cb
+            self.lane_layout.addWidget(cb)
+        self.lane_layout.addStretch()
+
+    def selected_lanes(self):
+        return sorted(lane for lane, cb in self.lane_checks.items() if cb.isChecked())
+
+    def select_all_lanes(self):
+        for cb in self.lane_checks.values():
+            cb.blockSignals(True)
+            cb.setChecked(True)
+            cb.blockSignals(False)
+        self.render_horizontal()
+
+    def clear_lane_selection(self):
+        for cb in self.lane_checks.values():
+            cb.blockSignals(True)
+            cb.setChecked(False)
+            cb.blockSignals(False)
+        self.render_horizontal()
+
+    def apply_lane_range(self):
+        lo = min(self.from_lane.value(), self.to_lane.value())
+        hi = max(self.from_lane.value(), self.to_lane.value())
+        for lane, cb in self.lane_checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(lo <= lane <= hi)
+            cb.blockSignals(False)
+        self.render_horizontal()
+
+    def render_horizontal(self, *_):
+        selected = self.selected_lanes()
+        chosen = [row for row in self.current_result_rows() if row['lane'] in selected]
+        self.relative_table.clear()
+        self.relative_table.setColumnCount(len(chosen))
+        self.relative_table.setRowCount(2)
+        self.relative_table.setVerticalHeaderLabels(['Sample', 'Relative expression'])
+        for i, r in enumerate(chosen):
+            sample_item = QTableWidgetItem(f"L{r['lane']} · {r['sample']}")
+            sample_item.setForeground(QColor(sample_color(r['sample'])))
+            self.relative_table.setItem(0, i, sample_item)
+            value_item = QTableWidgetItem(formatted(r['relative']))
+            value_item.setToolTip(r['status'])
+            self.relative_table.setItem(1, i, value_item)
+        self.relative_table.resizeColumnsToContents()
+        for column in range(self.relative_table.columnCount()):
+            self.relative_table.setColumnWidth(column, max(150, self.relative_table.columnWidth(column)))
+        self.copy_values_button.setEnabled(bool(chosen))
+        self.copy_names_button.setEnabled(bool(chosen))
 
     def copy_relative(self, with_names=False):
         a = self.analysis()
         if not a:
             return
-        rows = calculate(self.exp, a)
+        selected = self.selected_lanes()
+        rows = [r for r in self.current_result_rows() if r['lane'] in selected]
+        if not rows:
+            self.statusBar().showMessage('No selected lanes to copy.')
+            return
         plain, rich = relative_clipboard(rows, with_names)
         mime = QMimeData()
         mime.setText(plain)
         mime.setHtml(rich)
         QApplication.clipboard().setMimeData(mime)
         missing = sum(r['relative'] is None for r in rows)
-        self.statusBar().showMessage(f'Copied {len(rows)} lanes horizontally' +
-                                    (f' · {missing} unavailable values kept as blank cells.' if missing else '.'))
+        self.statusBar().showMessage(f'Copied {len(rows)} values to clipboard' +
+                                    (f' · {missing} unavailable values kept blank.' if missing else '.'))
+        self._flash_copy_button(self.copy_names_button if with_names else self.copy_values_button,
+                                len(rows), 'Copy with sample names' if with_names else 'Copy values')
+
+    def _flash_copy_button(self, button, count, label):
+        button.setText(f'✓ Copied {count} values')
+        QTimer.singleShot(1400, lambda: button.setText(label))
 
     def add_group(self):
         self.group_dialog(False)
@@ -987,8 +1219,7 @@ class MainWindow(QMainWindow):
             self.error('Select a group to edit.')
             return
         existing = a['groups'][index] if edit else None
-        occupied = {l for g in a['groups'] if g is not existing for l in g['lanes']}
-        d = GroupDialog(self, self.exp, occupied, existing)
+        d = GroupDialog(self, self.exp, existing)
         if d.exec():
             def change():
                 if existing:
@@ -1049,6 +1280,7 @@ def main():
     app = QApplication(sys.argv[:1])
     app.setApplicationName('Blot Notebook')
     app.setOrganizationName('BlotNotebook')
+    app.setWindowIcon(QIcon(str(asset_path('blotnotebook-seal.png'))))
     app.setStyle('Fusion')
     app.setStyleSheet(STYLE)
     settings = QSettings()

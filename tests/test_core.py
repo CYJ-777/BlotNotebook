@@ -3,7 +3,7 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
-from core import Store, fresh, uid, now, number, parse_biorad, calculate, export_csv, validate, remove_attachment
+from core import Store, fresh, uid, now, number, parse_biorad, calculate, calculate_group, export_csv, validate, remove_attachment, experiment_folder, archive_display_name
 
 
 def example():
@@ -77,13 +77,32 @@ class CalculationTests(unittest.TestCase):
 
     def test_invalid_group_configuration(self):
         e = example()
-        e['analyses'][0]['groups'][1]['lanes'].append(1)
+        e['analyses'][0]['groups'][0]['ref'] = 99
         with self.assertRaises(ValueError):
             validate(e)
+
+    def test_overlapping_group_membership_is_allowed(self):
         e = example()
-        e['analyses'][0]['groups'][0]['ref'] = 3
-        with self.assertRaises(ValueError):
-            validate(e)
+        e['analyses'][0]['groups'] = [
+            dict(id=uid(), name='A', lanes=[1, 2, 3], ref=1),
+            dict(id=uid(), name='B', lanes=[1, 4], ref=1),
+        ]
+        validate(e)
+        result = calculate(e, e['analyses'][0])
+        by_lane = {r['lane']: r for r in result}
+        self.assertEqual(by_lane[1]['relative'], 1)
+        self.assertEqual(by_lane[2]['relative'], .6)
+        self.assertEqual(by_lane[4]['relative'], .5)
+
+    def test_group_can_reference_a_lane_outside_its_members(self):
+        e = example()
+        group = dict(id=uid(), name='B', lanes=[3, 4], ref=1)
+        e['analyses'][0]['groups'] = [group]
+        validate(e)
+        result = calculate_group(e, e['analyses'][0], group)
+        self.assertEqual([row['lane'] for row in result], [3, 4])
+        self.assertEqual([row['relative'] for row in result], [2, .5])
+        self.assertTrue(all(row['reference'] == 1 for row in result))
 
 
 class StorageTests(unittest.TestCase):
@@ -130,6 +149,36 @@ class StorageTests(unittest.TestCase):
         loaded = self.s.load(e['id'])
         self.assertEqual(self.s.archived_path(loaded['files'][0]).read_bytes(), b'original exposure 1')
         self.assertEqual(self.s.archived_path(loaded['files'][1]).read_bytes(), b'original exposure 2')
+
+    def test_linked_archive_renames_without_touching_original_or_ids(self):
+        e = example()
+        source = self.root / 'raw.tif'
+        source.write_bytes(b'original exposure')
+        attachment = self.s.archive_file(e, source)
+        attachment['filename'] = 'unreadable:name?.tif'
+        e['files'] = [attachment]
+        self.s.save(e)
+        before_id, before_archive = attachment['id'], attachment['archive']
+        e['proteins'][0]['source_ids'] = [before_id]
+        self.s.save(e)
+        self.assertEqual(attachment['id'], before_id)
+        self.assertNotEqual(attachment['archive'], before_archive)
+        self.assertTrue(Path(attachment['archive']).name.startswith('EGFR__'))
+        self.assertEqual(source.read_bytes(), b'original exposure')
+        self.assertEqual(self.s.archived_path(attachment).read_bytes(), b'original exposure')
+        e['proteins'][1]['source_ids'] = [before_id]
+        self.s.save(e)
+        self.assertTrue(Path(attachment['archive']).name.startswith('EGFR+ACTB__'))
+        loaded = self.s.load(e['id'])
+        self.assertEqual(loaded['files'][0]['id'], before_id)
+        self.assertEqual(self.s.archived_path(loaded['files'][0]).read_bytes(), b'original exposure')
+
+    def test_archive_display_name_is_cross_platform_safe(self):
+        f = dict(id='a', filename='CON?.tif')
+        proteins = [dict(name='p/EGFR*', source_ids=['a'])]
+        name = archive_display_name(f, proteins)
+        self.assertEqual(name, 'pEGFR___CON.tif')
+        self.assertNotRegex(name, r'[\\/:*?"<>|]')
 
     def test_export_horizontal_raw_relative_and_formula_escaping(self):
         e = example()
@@ -182,7 +231,7 @@ class StorageTests(unittest.TestCase):
         e['files'] = [f]
         e['proteins'][0]['source_ids'] = [f['id']]
         self.s.save(e)
-        archive_dir = self.root / 'library' / 'experiments' / e['id']
+        archive_dir = self.root / 'library' / 'experiments' / e['folder']
         self.assertTrue(archive_dir.exists())
         self.s.delete(e['id'])
         self.assertIsNone(self.s.load(e['id']))
@@ -191,6 +240,51 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM audit_log WHERE experiment_id=?', (e['id'],)).fetchone()[0], 0)
         with self.assertRaises(ValueError):
             self.s.delete(e['id'])
+
+    def test_experiment_folder_is_readable_and_sanitized(self):
+        e = fresh()
+        e.update(id='261583e2-0000-0000-0000-000000000000', date='2026-09-08', cell='PC9', condition='MG132')
+        self.assertEqual(experiment_folder(e), '2026-09-08_PC9_MG132_261583e2')
+        e['cell'] = 'PC9/2*'
+        self.assertEqual(experiment_folder(e), '2026-09-08_PC92_MG132_261583e2')
+
+    def test_archive_folder_is_stable_after_metadata_change(self):
+        e = example()
+        e.update(id='261583e2-0000-0000-0000-000000000000', date='2026-09-08', cell='PC9', condition='MG132')
+        source = self.root / 'blot.tif'
+        source.write_bytes(b'stable bytes')
+        f = self.s.archive_file(e, source)
+        e['files'] = [f]
+        self.s.save(e)
+        folder_before = e['folder']
+        e['cell'] = 'PC10'
+        self.s.save(e)
+        loaded = self.s.load(e['id'])
+        self.assertEqual(loaded['folder'], folder_before)
+        self.assertEqual(self.s.archived_path(loaded['files'][0]).read_bytes(), b'stable bytes')
+
+    def test_migrates_legacy_archive_folder(self):
+        e = example()
+        e.update(id='261583e2-0000-0000-0000-000000000000', date='2026-09-08', cell='PC9', condition='MG132')
+        source = self.root / 'legacy.tif'
+        source.write_bytes(b'legacy bytes')
+        f = self.s.archive_file(e, source)
+        e['files'] = [f]
+        self.s.save(e)
+        readable = e['folder']
+        old_dir = self.root / 'library' / 'experiments' / readable
+        legacy_dir = self.root / 'library' / 'experiments' / e['id']
+        old_dir.rename(legacy_dir)
+        legacy_archive = f"experiments/{e['id']}/originals/{f['id']}/legacy.tif"
+        self.s.db.execute("UPDATE experiments SET folder=NULL WHERE id=?", (e['id'],))
+        self.s.db.execute("UPDATE original_files SET archive=? WHERE id=?", (legacy_archive, f['id']))
+        self.s.db.commit()
+        self.s.db.close()
+        self.s = Store(self.root / 'library')
+        loaded = self.s.load(e['id'])
+        self.assertTrue(loaded['folder'])
+        self.assertTrue((self.root / 'library' / 'experiments' / loaded['folder']).exists())
+        self.assertEqual(self.s.archived_path(loaded['files'][0]).read_bytes(), b'legacy bytes')
 
 
 if __name__ == '__main__':

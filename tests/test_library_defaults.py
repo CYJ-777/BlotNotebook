@@ -26,6 +26,7 @@ class LibraryDefaultsTests(unittest.TestCase):
         with (
             patch.object(app.sys, 'argv', argv),
             patch.object(app, 'QApplication') as application,
+            patch.object(app, 'QIcon'),
             patch.object(app, 'QSettings', return_value=settings),
             patch.object(app.QStandardPaths, 'writableLocation', return_value=(
                 str(Path(directory) / 'Documents') if documents is None else documents

@@ -4,7 +4,7 @@ from pathlib import Path
 
 a = Analysis(
     [str(Path(SPECPATH) / 'app.py')], pathex=[SPECPATH],
-    binaries=[], datas=[], hiddenimports=[], hookspath=[], hooksconfig={},
+    binaries=[], datas=[(str(Path(SPECPATH) / 'assets'), 'assets')], hiddenimports=[], hookspath=[], hooksconfig={},
     runtime_hooks=[], excludes=[], noarchive=False, optimize=0,
 )
 if sys.platform == 'win32':
@@ -18,6 +18,7 @@ exe = EXE(
     debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
     console=False, disable_windowed_traceback=False, argv_emulation=False,
     target_arch=None, codesign_identity=None, entitlements_file=None,
+    icon=str(Path(SPECPATH) / 'assets' / 'blotnotebook-seal.ico') if sys.platform == 'win32' else None,
 )
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='BlotNotebook')
 if sys.platform == 'darwin':

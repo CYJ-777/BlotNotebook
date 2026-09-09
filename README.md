@@ -70,6 +70,7 @@ core.py             Calculations, imports, SQLite storage, and CSV export
 pyproject.toml      Python requirements and dependencies
 uv.lock             Locked dependency versions
 BlotNotebook.spec   Shared macOS and Windows PyInstaller configuration
+assets/             Application icon assets
 tests/              Automated tests
 examples/           Sample TSV files for import
 docs/user-guide.md  Detailed usage instructions
