@@ -36,7 +36,7 @@ The UI uses Arial at 15px with taller table rows. Sample names containing `luc`,
 
 ## Traceability and backup
 
-The library contains `wbquant.sqlite3` and `experiments/<date_cell_condition_short-ID>/originals/<attachment UUID>/<display filename>`. Experiment folder names remain stable after metadata edits. Older UUID folders are migrated automatically when the library opens. Original source files are not modified. Files are streamed to a SHA-256 hash after copying. The original absolute path and portable archive-relative path are both retained. **Open archived file** uses the operating system's associated application; TIFF rendering is outside this app.
+The library contains `wbquant.sqlite3` and `experiments/<date_cell_condition_short-ID>/originals/<display filename>`. All archived files for an experiment live directly in its `originals` directory. Attachment UUIDs remain in the database and disambiguate same-name files with a short suffix. Experiment folder names remain stable after metadata edits. Older per-attachment UUID folders are flattened automatically when the library opens. Original source files are not modified. Files are streamed to a SHA-256 hash after copying. The original absolute path and portable archive-relative path are both retained. **Open archived file** uses the operating system's associated application; TIFF rendering is outside this app.
 
 Raw edits record old/new values and UTC timestamps in **History**. Complete snapshots preserve the earlier labels, imports and calculation settings. **View pasted source** displays the exact imported clipboard text. History is an application audit trail, not a tamper-proof regulated record.
 

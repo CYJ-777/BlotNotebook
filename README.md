@@ -14,7 +14,7 @@ On first launch, the app creates its library automatically and opens the main wi
 - **macOS:** `~/Documents/BlotNotebook`
 - **Windows:** `BlotNotebook` inside your Documents folder, typically `C:\Users\<username>\Documents\BlotNotebook`
 
-The library contains the `wbquant.sqlite3` database and copies of attached original files.
+The library contains the `wbquant.sqlite3` database and copies of attached original files. Archived files are stored directly under each experiment's `originals` folder; legacy per-attachment UUID folders are flattened automatically when the library opens.
 To back up your data, close the app and copy the entire `BlotNotebook` library folder.
 
 If your Windows Documents folder has been relocated, the app uses the location reported by the OS.

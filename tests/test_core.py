@@ -150,6 +150,42 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.s.archived_path(loaded['files'][0]).read_bytes(), b'original exposure 1')
         self.assertEqual(self.s.archived_path(loaded['files'][1]).read_bytes(), b'original exposure 2')
 
+    def test_new_archives_are_flat_and_same_names_get_stable_suffixes(self):
+        e = example()
+        first_source = self.root / 'first.tif'
+        second_source = self.root / 'second.tif'
+        first_source.write_bytes(b'first')
+        second_source.write_bytes(b'second')
+        first = self.s.archive_file(e, first_source)
+        second = self.s.archive_file(e, second_source)
+        self.assertEqual(Path(first['archive']).parts[-2], 'originals')
+        self.assertEqual(Path(second['archive']).parts[-2], 'originals')
+        self.assertNotEqual(first['archive'], second['archive'])
+        self.assertEqual(self.s.archived_path(first).read_bytes(), b'first')
+        self.assertEqual(self.s.archived_path(second).read_bytes(), b'second')
+
+    def test_migrates_nested_attachment_folder_to_flat_archive(self):
+        e = example()
+        source = self.root / 'nested.tif'
+        source.write_bytes(b'nested bytes')
+        f = self.s.archive_file(e, source)
+        e['files'] = [f]
+        self.s.save(e)
+        flat = self.s.archived_path(f)
+        nested = flat.parent / f['id'] / flat.name
+        nested.parent.mkdir()
+        flat.rename(nested)
+        legacy_archive = f"experiments/{e['folder']}/originals/{f['id']}/{flat.name}"
+        self.s.db.execute('UPDATE original_files SET archive=? WHERE id=?', (legacy_archive, f['id']))
+        self.s.db.commit()
+        self.s.db.close()
+        self.s = Store(self.root / 'library')
+        loaded = self.s.load(e['id'])
+        migrated = loaded['files'][0]
+        self.assertEqual(Path(migrated['archive']).parts[-2], 'originals')
+        self.assertNotIn(f['id'], Path(migrated['archive']).parts)
+        self.assertEqual(self.s.archived_path(migrated).read_bytes(), b'nested bytes')
+
     def test_linked_archive_renames_without_touching_original_or_ids(self):
         e = example()
         source = self.root / 'raw.tif'
@@ -276,6 +312,9 @@ class StorageTests(unittest.TestCase):
         legacy_dir = self.root / 'library' / 'experiments' / e['id']
         old_dir.rename(legacy_dir)
         legacy_archive = f"experiments/{e['id']}/originals/{f['id']}/legacy.tif"
+        legacy_file = legacy_dir / 'originals' / f['id'] / 'legacy.tif'
+        legacy_file.parent.mkdir()
+        (legacy_dir / 'originals' / Path(f['archive']).name).rename(legacy_file)
         self.s.db.execute("UPDATE experiments SET folder=NULL WHERE id=?", (e['id'],))
         self.s.db.execute("UPDATE original_files SET archive=? WHERE id=?", (legacy_archive, f['id']))
         self.s.db.commit()

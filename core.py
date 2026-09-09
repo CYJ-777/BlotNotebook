@@ -327,13 +327,11 @@ class Store:
             try:
                 with self.db:
                     eid = row['id']
-                    if row['folder']:
-                        continue
                     e = self.load(eid)
                     folder = experiment_folder(e) if e else ('experiment_' + eid[:8])
                     old_dir = self.root / 'experiments' / eid
                     new_dir = self.root / 'experiments' / folder
-                    if old_dir.exists():
+                    if not row['folder'] and old_dir.exists():
                         target = new_dir
                         suffix = 0
                         while target.exists() and target.resolve() != old_dir.resolve():
@@ -350,12 +348,48 @@ class Store:
                                 "WHERE experiment_id=? AND archive LIKE ?",
                                 (old_prefix, new_prefix, eid, old_prefix + '%'))
                         self.db.execute('UPDATE experiments SET folder=? WHERE id=?', (folder, eid))
-                        continue
-                    self.db.execute('UPDATE experiments SET folder=? WHERE id=?', (folder, eid))
+                    elif not row['folder']:
+                        self.db.execute('UPDATE experiments SET folder=? WHERE id=?', (folder, eid))
+                    if e:
+                        e['folder'] = folder
+                        self._flatten_archive_paths(e)
             except Exception:
                 if moved_from is not None and target.exists() and not moved_from.exists():
                     target.rename(moved_from)
                 raise
+
+    def _flatten_archive_paths(self, e):
+        """Move legacy per-attachment directories into one experiment originals folder."""
+        changes = []
+        try:
+            originals = self.root / 'experiments' / e['folder'] / 'originals'
+            originals.mkdir(parents=True, exist_ok=True)
+            for file_record in e['files']:
+                current = self.archived_path(file_record)
+                if not current.exists() or current.parent == originals:
+                    continue
+                target = originals / archive_display_name(file_record, e['proteins'])
+                if target.exists() and target.resolve() != current.resolve():
+                    target = originals / f'{target.stem}_{file_record["id"][:8]}{target.suffix}'
+                if target.exists() and target.resolve() != current.resolve():
+                    raise FileExistsError(f'Archive name is already in use: {target.name}')
+                current.rename(target)
+                try:
+                    current.parent.rmdir()
+                except OSError:
+                    pass
+                previous = file_record['archive']
+                file_record['archive'] = target.relative_to(self.root).as_posix()
+                self.db.execute('UPDATE original_files SET archive=? WHERE id=?', (file_record['archive'], file_record['id']))
+                changes.append((file_record, previous, current, target))
+            self.db.commit()
+        except Exception:
+            for file_record, previous, old_path, new_path in reversed(changes):
+                if new_path.exists() and not old_path.exists():
+                    new_path.rename(old_path)
+                file_record['archive'] = previous
+            self.db.rollback()
+            raise
 
     def search(self, text=''):
         rows = self.db.execute('''SELECT e.* FROM experiments e ORDER BY date DESC,updated DESC''').fetchall()
@@ -458,6 +492,8 @@ class Store:
                 continue
             if target.exists():
                 target = target.with_name(f'{target.stem}_{file_record["id"][:8]}{target.suffix}')
+                if target.resolve() == current.resolve():
+                    continue
                 if target.exists():
                     raise FileExistsError(f'Archive name is already in use: {target.name}')
             previous_archive = file_record['archive']
@@ -494,9 +530,13 @@ class Store:
         fid = uid()
         if not e.get('folder'):
             e['folder'] = experiment_folder(e)
-        relative = Path('experiments') / e['folder'] / 'originals' / fid / src.name
-        destination = self.root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        originals = self.root / 'experiments' / e['folder'] / 'originals'
+        originals.mkdir(parents=True, exist_ok=True)
+        filename = archive_display_name(dict(id=fid, filename=src.name), [])
+        destination = originals / filename
+        if destination.exists():
+            destination = originals / f'{destination.stem}_{fid[:8]}{destination.suffix}'
+        relative = destination.relative_to(self.root)
         try:
             shutil.copy2(src, destination)
             with destination.open('rb') as stream:
