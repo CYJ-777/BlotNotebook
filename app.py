@@ -680,9 +680,32 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.denominator, 1)
         actions.addWidget(button('Add calculation', self.add_analysis, True))
         v.addLayout(actions)
+        v.addWidget(QLabel('Saved calculations'))
         self.analysis_choice = QComboBox()
         self.analysis_choice.currentIndexChanged.connect(self.analysis_changed)
         v.addWidget(self.analysis_choice)
+        self.copy_groups_panel = QWidget()
+        self.copy_groups_panel.setObjectName('card')
+        copy_layout = QVBoxLayout(self.copy_groups_panel)
+        copy_layout.setContentsMargins(18, 14, 18, 14)
+        copy_layout.setSpacing(8)
+        copy_header = QHBoxLayout()
+        self.copy_groups_title = heading('Groups to copy')
+        copy_header.addWidget(self.copy_groups_title)
+        copy_header.addStretch()
+        copy_header.addWidget(button('Select all', self.select_all_copy_groups))
+        copy_header.addWidget(button('Clear', self.clear_copy_groups))
+        copy_layout.addLayout(copy_header)
+        copy_layout.addWidget(hint(
+            'Choose the groups to copy into the next calculation. Copies receive independent IDs.'
+        ))
+        self.copy_group_checks = {}
+        self.copy_group_checks_layout = QVBoxLayout()
+        self.copy_group_checks_layout.setContentsMargins(0, 0, 0, 0)
+        self.copy_group_checks_layout.setSpacing(3)
+        copy_layout.addLayout(self.copy_group_checks_layout)
+        self.copy_group_source_id = None
+        v.addWidget(self.copy_groups_panel)
         group_filter_row = QHBoxLayout()
         group_filter_row.addWidget(QLabel('View group'))
         self.group_filter = QComboBox()
@@ -990,6 +1013,7 @@ class MainWindow(QMainWindow):
         if i >= 0:
             self.analysis_choice.setCurrentIndex(i)
         self.analysis_choice.blockSignals(False)
+        self.update_copy_groups_option()
         self.populate_group_filter()
         self.populate_lane_selector()
         self.render_analysis()
@@ -1183,6 +1207,7 @@ class MainWindow(QMainWindow):
     def analysis_changed(self, *_):
         if self.rendering:
             return
+        self.update_copy_groups_option()
         self.populate_group_filter()
         self.populate_lane_selector(reset=True)
         self.render_analysis()
@@ -1199,9 +1224,47 @@ class MainWindow(QMainWindow):
             if a['num'] == n and a['den'] == d:
                 self.analysis_choice.setCurrentIndex(self.analysis_choice.findData(a['id']))
                 return
-        a = dict(id=uid(), num=n, den=d, groups=[])
+        source = self.analysis()
+        groups = []
+        if source:
+            selected = {gid for gid, check in self.copy_group_checks.items() if check.isChecked()}
+            groups = [dict(group, id=uid(), lanes=list(group['lanes']))
+                      for group in source['groups'] if group['id'] in selected]
+        a = dict(id=uid(), num=n, den=d, groups=groups)
         self.mutate(lambda: self.exp['analyses'].append(a))
         self.analysis_choice.setCurrentIndex(self.analysis_choice.findData(a['id']))
+
+    def update_copy_groups_option(self):
+        source = self.analysis()
+        source_id = source['id'] if source else None
+        previous = ({gid for gid, check in self.copy_group_checks.items() if check.isChecked()}
+                    if source_id == self.copy_group_source_id else None)
+        while self.copy_group_checks_layout.count():
+            item = self.copy_group_checks_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.copy_group_checks = {}
+        groups = source['groups'] if source else []
+        self.copy_groups_panel.setVisible(bool(groups))
+        self.copy_group_source_id = source_id
+        if not groups:
+            return
+        self.copy_groups_title.setText('Copy groups from ' + self.analysis_choice.currentText())
+        for group in groups:
+            members = ', '.join(f'L{lane}' for lane in group['lanes'])
+            check = ClearCheckBox(f"{group['name']}  ·  {members}  ·  reference L{group['ref']}")
+            check.setChecked(previous is None or group['id'] in previous)
+            self.copy_group_checks[group['id']] = check
+            self.copy_group_checks_layout.addWidget(check)
+
+    def select_all_copy_groups(self):
+        for check in self.copy_group_checks.values():
+            check.setChecked(True)
+
+    def clear_copy_groups(self):
+        for check in self.copy_group_checks.values():
+            check.setChecked(False)
 
     def render_analysis(self, *_):
         a = self.analysis()

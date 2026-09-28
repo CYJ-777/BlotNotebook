@@ -10,11 +10,59 @@ from unittest.mock import Mock, patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtWidgets import QApplication
 from app import MainWindow, STYLE, asset_path
-from core import Store, export_csv
+from core import Store, export_csv, uid
 from test_core import example
 
 
 class MergeTests(unittest.TestCase):
+    def test_new_calculation_can_copy_independent_groups(self):
+        application = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(directory)
+            try:
+                experiment = example()
+                gapdh = dict(
+                    id=uid(), name='GAPDH', label='', source_ids=[], imports=[],
+                    values={str(lane): 25.0 for lane in range(1, 5)},
+                )
+                tubulin = dict(
+                    id=uid(), name='Tubulin', label='', source_ids=[], imports=[],
+                    values={str(lane): 40.0 for lane in range(1, 5)},
+                )
+                experiment['proteins'].extend([gapdh, tubulin])
+                window.exp = experiment
+                window.store.save(experiment)
+                window.render()
+                source = experiment['analyses'][0]
+                self.assertEqual(set(window.copy_group_checks), {g['id'] for g in source['groups']})
+                self.assertTrue(all(check.isChecked() for check in window.copy_group_checks.values()))
+                self.assertIn('EGFR', window.copy_groups_title.text())
+                window.copy_group_checks[source['groups'][1]['id']].setChecked(False)
+                window.numerator.setCurrentIndex(window.numerator.findData(source['num']))
+                window.denominator.setCurrentIndex(window.denominator.findData(gapdh['id']))
+                window.add_analysis()
+                copied = window.analysis()
+                self.assertEqual(copied['num'], source['num'])
+                self.assertEqual(copied['den'], gapdh['id'])
+                self.assertEqual(
+                    [(g['name'], g['lanes'], g['ref']) for g in copied['groups']],
+                    [(g['name'], g['lanes'], g['ref']) for g in source['groups'][:1]],
+                )
+                self.assertTrue(
+                    set(g['id'] for g in copied['groups']).isdisjoint(g['id'] for g in source['groups'])
+                )
+                copied['groups'][0]['lanes'].append(4)
+                self.assertNotEqual(copied['groups'][0]['lanes'], source['groups'][0]['lanes'])
+                window.numerator.setCurrentIndex(window.numerator.findData(source['num']))
+                window.denominator.setCurrentIndex(window.denominator.findData(tubulin['id']))
+                window.clear_copy_groups()
+                window.add_analysis()
+                self.assertEqual(window.analysis()['groups'], [])
+            finally:
+                window.close()
+                window.deleteLater()
+                application.processEvents()
+
     def test_overlapping_groups_export_their_own_reference(self):
         e = example()
         e['analyses'][0]['groups'][1]['lanes'] = [1, 3, 4]
